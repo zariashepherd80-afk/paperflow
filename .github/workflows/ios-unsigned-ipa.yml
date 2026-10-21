@@ -1,0 +1,125 @@
+name: Build iOS Unsigned IPA
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      scheme:
+        description: Xcode scheme to archive (defaults to App)
+        required: false
+        default: App
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    name: Build unsigned iOS IPA
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js with npm cache
+        uses: actions/setup-node@v7
+        with:
+          # Keep the build on the repository's lockfile for reproducible artifacts.
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Ensure Capacitor iOS project exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -d ios/App/App.xcodeproj ]]; then
+            npx cap add ios
+          fi
+
+      - name: Sync Capacitor iOS project
+        run: npx cap sync ios
+
+      - name: Archive without code signing
+        env:
+          IOS_SCHEME: ${{ inputs.scheme || 'App' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Assumption: the planned app uses the conventional App scheme.
+          # workflow_dispatch provides a scheme override for repositories that differ.
+          container_flag=""
+          container_path=""
+
+          # Prefer a workspace so CocoaPods dependencies are included when present.
+          for candidate in ios/App.xcworkspace ios/App/App.xcworkspace; do
+            if [[ -d "$candidate" ]]; then
+              container_flag="-workspace"
+              container_path="$candidate"
+              break
+            fi
+          done
+
+          if [[ -z "$container_path" ]]; then
+            for candidate in ios/App.xcodeproj ios/App/App.xcodeproj; do
+              if [[ -d "$candidate" ]]; then
+                container_flag="-project"
+                container_path="$candidate"
+                break
+              fi
+            done
+          fi
+
+          if [[ -z "$container_path" ]]; then
+            echo "::error::No iOS App.xcworkspace or App.xcodeproj found under ios/."
+            exit 1
+          fi
+
+          mkdir -p build
+          xcodebuild \
+            "$container_flag" "$container_path" \
+            -scheme "$IOS_SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/App.xcarchive" \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package archived app as unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          app_path="$(find build/App.xcarchive/Products/Applications -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [[ -z "$app_path" ]]; then
+            echo "::error::No .app found in the Xcode archive."
+            exit 1
+          fi
+
+          rm -rf build/ipa build/ios-unsigned.ipa
+          mkdir -p build/ipa/Payload
+          cp -R "$app_path" build/ipa/Payload/
+          (
+            cd build/ipa
+            /usr/bin/zip -qry ../ios-unsigned.ipa Payload
+          )
+          test -s build/ios-unsigned.ipa
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-ipa-${{ github.run_number }}
+          path: build/ios-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14

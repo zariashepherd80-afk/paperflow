@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Paperflow</string>
+    <string name="title_activity_main">Paperflow</string>
+    <string name="package_name">com.paperflow.app</string>
+    <string name="custom_url_scheme">com.paperflow.app</string>
+</resources>
